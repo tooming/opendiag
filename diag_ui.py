@@ -37,6 +37,7 @@ import paths  # noqa: E402
 import power_diag  # noqa: E402
 import ds2_diag    # noqa: E402
 import obd2        # noqa: E402  (shared Mode-01 PID decode formulas)
+import iso9141     # noqa: E402  (legacy pre-KWP2000 K-line OBD-II framing)
 from power_diag import KLine, hexs, frame_payload, now  # noqa: E402
 from transaction import get_transaction_manager  # noqa: E402
 import coding  # noqa: E402
@@ -1285,6 +1286,153 @@ class Obd2Adapter:
         return s
 
 
+class Iso9141Adapter(Obd2Adapter):
+    """Legacy ISO 9141-2 K-line OBD-II (SAE J1979) -- the framing
+    predecessor to KWP2000 fast-init that Obd2Adapter speaks. Confirmed
+    live on a 1999 Porsche 996.1 (Motronic ME7.8): 5-baud init at the
+    standard address 0x33 returns key bytes 0x08 0x08 (plain ISO9141-2,
+    not KWP2000's 0x8x/0x94 range), and requests use a fixed `68 6A F1`
+    header with no length byte -- entirely different wire framing from
+    Obd2Adapter's KWP2000 path, see iso9141.py. Tried after Obd2Adapter in
+    connect()'s auto order (a KWP2000-speaking car will already have
+    matched there); the 5-baud init itself takes ~2s of bit-banging, so
+    this is deliberately the slowest/last thing auto-detect tries.
+
+    Same live_channels/_PID_CHANNELS as Obd2Adapter -- the PID math in
+    obd2.py is transport-agnostic -- but detect/scan/faults/clear/
+    live_sample are all overridden for the different wire format. More
+    than one ECU can answer the functional broadcast (confirmed: 0x11 the
+    real ME7.8, 0x1A a near-empty secondary responder that still had a
+    genuine stored DTC) -- scan()/faults() report every responder found,
+    while live_sample() tracks whichever one has real Mode-01 PID support
+    as self._src."""
+    name = "Legacy OBD-II (SAE J1979, ISO 9141-2 K-line)"
+    proto = "iso9141"
+
+    def __init__(self):
+        super().__init__()
+        self._src = None
+        self._supported = {}
+
+    def _ensure_init(self):
+        """Do the (slow, ~2s) 5-baud init only if the bus session isn't
+        already warm. Unlike KWP2000's fast_init (cheap, per-address, so
+        E39Adapter/E87Adapter/Obd2Adapter happily redo it once per module),
+        ISO9141-2 here has exactly one shared functional session across
+        every responding ECU -- re-running 5-baud init back-to-back (e.g.
+        once per module from the UI's "read all faults" loop) made the
+        second attempt get refused/ignored on the real car. self._live_init
+        doubles as this adapter's "bus session is warm" flag, reused by
+        live_sample() below for the same reason."""
+        if self._live_init:
+            return True
+        kb = self.kl.slow_init(power_diag.OBD_FUNCTIONAL)
+        if not kb:
+            return False
+        time.sleep(0.3)  # W4 min gap before the first request, per spec
+        self._live_init = True
+        return True
+
+    def detect(self):
+        if not self._ensure_init():
+            return False
+        self._supported = iso9141.supported_pids(self.kl)
+        if self._supported:
+            self._src = max(self._supported, key=lambda s: len(self._supported[s]))
+        v = self.read_vin()
+        if v:
+            self.vin = v
+        return True
+
+    def read_vin(self):
+        return iso9141.read_vin(self.kl)
+
+    def scan(self):
+        self._live_init = False  # user-triggered rescan: force a fresh init
+        if not self._ensure_init():
+            return []
+        self._supported = iso9141.supported_pids(self.kl)
+        if self._supported:
+            self._src = max(self._supported, key=lambda s: len(self._supported[s]))
+        return [{"addr": src,
+                "name": f"OBD-II responder 0x{src:02X}"
+                        + (" (primary)" if src == self._src else ""),
+                "ident": f"{len(pids)} Mode-01 PIDs supported",
+                "ident_ascii": " ".join(f"{p:02X}" for p in pids)}
+               for src, pids in sorted(self._supported.items())]
+
+    def faults(self, addr, _init=True):
+        if _init and not self._ensure_init():
+            return {"ok": False, "error": "no response to init"}
+        dtcs = iso9141.read_dtcs(self.kl, timeout=1.0)
+        if addr not in dtcs and _init:
+            # The bus session can go idle and stop answering after enough
+            # silence (confirmed live: ~30s between the previous request
+            # and this one was enough to lose it) -- self._live_init
+            # looked warm but wasn't, so force one fresh 5-baud re-init
+            # and retry before reporting a real failure. Skipped when
+            # _init=False (clear()'s internal post-clear read, which is
+            # always within the same still-warm window as its own init).
+            self._live_init = False
+            if self._ensure_init():
+                dtcs = iso9141.read_dtcs(self.kl, timeout=1.0)
+        if addr not in dtcs:
+            return {"ok": False, "error": "no response to DTC read"}
+        codes = dtcs[addr]
+        entries = [{"code": c, "raw": c, "text": "", "status": ""}
+                  for c in codes]
+        return {"ok": True, "count": len(entries), "entries": entries,
+                "raw": ""}
+
+    def clear(self, addr):
+        if not self._ensure_init():
+            return {"ok": False, "error": "no response to init"}
+        iso9141.clear_dtcs(self.kl, timeout=2.0)
+        time.sleep(0.5)
+        after = self.faults(addr, _init=False)
+        cleared = after.get("ok") and after.get("count", 1) == 0
+        return {"ok": cleared,
+                "status": "cleared" if cleared else "no answer",
+                "after": after}
+
+    def live_sample(self):
+        if not self._ensure_init():
+            return {}
+        if self._src is None:
+            self._supported = iso9141.supported_pids(self.kl)
+            if self._supported:
+                self._src = max(self._supported,
+                                key=lambda s: len(self._supported[s]))
+        if self._src is None:
+            return {}
+        s = {}
+        for chan_id, pid in self._PID_CHANNELS.items():
+            raw = iso9141.read_pid(self.kl, pid, timeout=0.3)
+            d = raw.get(self._src)
+            if d:
+                s[chan_id] = round(obd2.decode_pid(pid, d), 2)
+        raw = iso9141.read_pid(self.kl, 0x03, timeout=0.3)
+        d = raw.get(self._src) if raw else None
+        # PID 0x03's response has no A-byte-per-SAE data shape like the
+        # other PIDs above (decode_fuel_system_status wants the raw first
+        # byte directly) -- iso9141.read_pid(0x01, 0x03) actually issues a
+        # Mode-01 PID-0x03 request, whose data IS that status byte, so this
+        # mirrors Obd2Adapter.live_sample()'s equivalent call exactly.
+        if d:
+            txt = obd2.decode_fuel_system_status(d[0])
+            if txt:
+                s["fuel_status"] = txt
+        if "maf" in s:
+            pw, tq = estimate_power_torque(s["maf"], s.get("rpm") or 0)
+            if pw is not None:
+                s["power_kw"] = pw
+            if tq is not None:
+                s["torque_nm"] = tq
+        if not s:
+            self._live_init = False  # force re-init next time
+        return s
+
+
 ADAPTER = None            # current protocol adapter
 ADAPTER_ERR = ""
 
@@ -1308,8 +1456,25 @@ def _current_vin():
     connection to exist or be viewed/logged to -- anonymous-first, VIN is
     optional data, not identity (see ovpf_producer.ensure_passport). None
     resolves to the single "unknown vin" passport, same as running this
-    tool with no car plugged in at all."""
+    tool with no car plugged in at all.
+
+    NOTE: for an E39 whose VIN hasn't been read yet, ADAPTER.vin is a
+    literal placeholder string ("WBAXXXXXXXXXXXXXX"), not None -- see
+    E39Adapter.vin_placeholder. Callers that log OVPF events should prefer
+    _current_urn() (set by connect()'s garage-vehicle picker) over this
+    when the car isn't identified yet, or every unidentified E39 session
+    silently piles into one shared passport (found live -- see the ovpf
+    urn-awareness fixes' commit history)."""
     return ADAPTER.vin if ADAPTER else None
+
+
+def _current_urn():
+    """Garage-vehicle urn for the connected car, when it isn't identified
+    by VIN yet -- see connect()'s vehicle picker (ADAPTER.session_urn) and
+    record_faults/record_clear/etc.'s urn= param. None once the real VIN is
+    known (those callers should just use _current_vin() then) or with no
+    car connected at all."""
+    return getattr(ADAPTER, "session_urn", None) if ADAPTER else None
 
 
 def gather_vehicle_info():
@@ -1395,6 +1560,15 @@ def gather_vehicle_info():
         vehicle_info["model"] = "Unknown (generic OBD-II)"
         vehicle_info["engine"] = None
         vehicle_info["engine_evidence"] = "not auto-detected"
+
+    elif ADAPTER.proto == "iso9141":
+        # Same "don't guess model/engine" stance -- protocol/framing is
+        # genuinely known (that's what selected this Adapter), the actual
+        # car isn't. Report which ECU addresses answered instead.
+        vehicle_info["model"] = "Unknown (legacy OBD-II, ISO 9141-2)"
+        vehicle_info["engine"] = None
+        vehicle_info["engine_evidence"] = "not auto-detected"
+        vehicle_info["responders"] = sorted(getattr(ADAPTER, "_supported", {}))
 
     # Add transmission type (default unknown, can be enhanced)
     vehicle_info["transmission"] = "Unknown"
@@ -2029,10 +2203,10 @@ def connect(proto="auto"):
         if ADAPTER:
             ADAPTER.close()
             ADAPTER = None
-        order = {"auto": [E39Adapter, E87Adapter, Obd2Adapter],
+        order = {"auto": [E39Adapter, E87Adapter, Obd2Adapter, Iso9141Adapter],
                  "demo": [DemoAdapter],
                  "e39": [E39Adapter], "e87": [E87Adapter],
-                 "obd2": [Obd2Adapter]}[proto]
+                 "obd2": [Obd2Adapter], "iso9141": [Iso9141Adapter]}[proto]
         errs = []
         for cls in order:
             try:
@@ -2043,10 +2217,36 @@ def connect(proto="auto"):
             if a.detect():
                 ADAPTER = a
                 ADAPTER_ERR = ""
-                try:    # auto-mint the passport the moment we know the car
-                    ovpf_producer.ensure_passport(a.vin)
-                except Exception:
-                    pass
+                placeholder = getattr(a, "vin_placeholder", None)
+                identified = bool(a.vin) and a.vin != placeholder
+                if identified:
+                    try:    # auto-mint the passport the moment we know the car
+                        ovpf_producer.ensure_passport(a.vin)
+                    except Exception:
+                        pass
+                else:
+                    # Not identified yet -- resolve which garage vehicle
+                    # this connection belongs to (session_urn) instead of
+                    # ensure_passport(a.vin) funneling it into the one
+                    # shared placeholder-vin passport, same for every
+                    # unidentified car (found live -- see the ovpf
+                    # urn-awareness fixes' commit history for the cleanup
+                    # this caused). Zero or one existing no-VIN garage
+                    # vehicle resolves on its own; more than one is
+                    # genuinely ambiguous (could be a different physical
+                    # car than last time) and needs the client to ask via
+                    # /api/connect/assign_vehicle before anything logs.
+                    a.session_urn = None
+                    try:
+                        candidates = [
+                            s for s in ovpf_producer.list_passports(False)
+                            if not (s.get("vehicle") or {}).get("vin")]
+                        if len(candidates) == 1:
+                            a.session_urn = candidates[0]["passport_urn"]
+                        elif not candidates:
+                            _, a.session_urn = ovpf_producer.mint_passport()
+                    except Exception:
+                        pass
                 return a
             a.close()
             errs.append(f"{cls.proto}: no response")
@@ -2582,11 +2782,24 @@ class Handler(BaseHTTPRequestHandler):
                 ADAPTER, "engine_info")) else None
             if ADAPTER and info:
                 try:    # let the passport 'learn' the car (VehicleIdentified)
-                    ovpf_producer.record_vehicle_identified(ADAPTER.vin, {
-                        "vin": ADAPTER.vin,
-                        "engine": info.get("engine"),
-                        "dme": info.get("dme")}, operator=_current_operator())
-                    _auto_push(ADAPTER.vin)
+                    # A placeholder vin (not read yet) is not a real fact --
+                    # writing it into "vin" would make an unidentified car's
+                    # passport look identified. Target urn when there's no
+                    # real vin, same as record_faults/record_clear.
+                    placeholder = getattr(ADAPTER, "vin_placeholder", None)
+                    real_vin = ADAPTER.vin if ADAPTER.vin != placeholder else None
+                    facts = {"engine": info.get("engine"), "dme": info.get("dme")}
+                    if real_vin:
+                        facts["vin"] = real_vin
+                        ovpf_producer.record_vehicle_identified(
+                            real_vin, facts, operator=_current_operator())
+                        _auto_push(real_vin)
+                    else:
+                        urn = _current_urn()
+                        if urn:
+                            ovpf_producer.record_vehicle_identified_by_urn(
+                                urn, facts, operator=_current_operator())
+                            _auto_push(None, urn=urn)
                 except Exception:
                     pass
             self._json({"detected": info,
@@ -2629,6 +2842,23 @@ class Handler(BaseHTTPRequestHandler):
                 profile = getattr(a, "current_profile", None) if a else None
                 profiles = list(MS41_PROFILES.keys()) if a and a.proto == "e39" else []
                 stats = getattr(a, "profile_stats", None) if a else None
+                # Unidentified car with >1 no-VIN garage vehicle on file:
+                # connect() left session_urn unresolved (genuinely
+                # ambiguous, could be a different physical car than last
+                # time) -- the client must ask the user which one this is
+                # via /api/connect/assign_vehicle before logging anything,
+                # or every action would (again) have nowhere correct to go.
+                needs_pick = a is not None and a.vin == getattr(a, "vin_placeholder", None) \
+                    and not getattr(a, "session_urn", None)
+                candidates = None
+                if needs_pick:
+                    try:
+                        candidates = [
+                            {"urn": s["passport_urn"], "name": s.get("name")}
+                            for s in ovpf_producer.list_passports(False)
+                            if not (s.get("vehicle") or {}).get("vin")]
+                    except Exception:
+                        candidates = []
                 self._json({"connected": a is not None,
                             "protocol": a.proto if a else None,
                             "name": a.name if a else None,
@@ -2636,7 +2866,28 @@ class Handler(BaseHTTPRequestHandler):
                             "profile": profile,
                             "profiles": profiles,
                             "profile_stats": stats,
+                            "needs_vehicle_pick": needs_pick,
+                            "vehicle_candidates": candidates,
+                            "session_urn": getattr(a, "session_urn", None) if a else None,
                             "error": ADAPTER_ERR})
+            elif self.path == "/api/connect/assign_vehicle":
+                # Resolves connect()'s ambiguous case (see needs_vehicle_pick
+                # above): { urn: "..." } to log against an existing garage
+                # vehicle, or { new: true, nickname?: "..." } to mint a
+                # fresh one. Only meaningful while the connected car is
+                # still unidentified -- a no-op once a real VIN is known.
+                if not ADAPTER:
+                    return self._json({"error": "not connected"}, 400)
+                b = self._body()
+                if b.get("new"):
+                    _, urn = ovpf_producer.mint_passport(
+                        nickname=b.get("nickname"), operator=_current_operator())
+                else:
+                    urn = (b.get("urn") or "").strip()
+                    if not urn or not ovpf_producer._path_for_urn(urn):
+                        return self._json({"error": "unknown urn"}, 400)
+                ADAPTER.session_urn = urn
+                self._json({"session_urn": urn})
             elif self.path == "/api/scan":
                 if not ADAPTER:
                     return self._json({"error": "not connected"}, 400)
@@ -2650,8 +2901,8 @@ class Handler(BaseHTTPRequestHandler):
                     ovpf_producer.record_faults(
                         ADAPTER.vin, addr,
                         ADAPTER.modules.get(addr, f"0x{addr:02X}"), res,
-                        operator=_current_operator())
-                    _auto_push(ADAPTER.vin)
+                        operator=_current_operator(), urn=_current_urn())
+                    _auto_push(ADAPTER.vin, urn=_current_urn())
                 except Exception:
                     pass
                 self._json(res)
@@ -2683,8 +2934,8 @@ class Handler(BaseHTTPRequestHandler):
                         try:    # append an OVPF DiagnosticTroubleCodeCleared
                             ovpf_producer.record_clear(
                                 ADAPTER.vin, addr, module_name,
-                                operator=_current_operator())
-                            _auto_push(ADAPTER.vin)
+                                operator=_current_operator(), urn=_current_urn())
+                            _auto_push(ADAPTER.vin, urn=_current_urn())
                         except Exception:
                             pass
 
