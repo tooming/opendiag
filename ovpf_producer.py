@@ -135,16 +135,44 @@ def ensure_passport(vin):
         return path, urn
 
 
+def mint_passport(nickname=None, operator=None):
+    """Always create a genuinely fresh, distinct passport -- unlike
+    ensure_passport(vin), which reuses a shared file for any vin that's
+    falsy or repeats (e.g. every unidentified car funneling into the same
+    "unknown" bucket, or an adapter's not-yet-confirmed VIN placeholder).
+
+    For a car connected without (yet) having its VIN read: diag_ui.py's
+    connect() calls this once per newly-seen unidentified vehicle (see its
+    garage-vehicle-picker flow) so each physical car gets its own passport
+    from the start, rather than everything piling into one shared log until
+    someone notices and manually untangles it (see the ovpf urn-awareness
+    fixes' commit history for exactly that cleanup on a live car)."""
+    urn = "urn:ovpf:" + ovpf_core.uuid7()
+    path = _log_path(urn)
+    with _WRITE_LOCK:
+        ovpf_core.append(path, ovpf_core.envelope(
+            urn, "PassportOpened", {"vehicle": {"type": "Vehicle"}}, MANUAL))
+        if nickname:
+            _append_vehicle_identified(path, urn, {"nickname": nickname}, operator)
+    return path, urn
+
+
 # --- mappers: diagnostic results -> events ---------------------------------
 
-def record_faults(vin, addr, module_name, faults_result, operator=None):
+def record_faults(vin, addr, module_name, faults_result, operator=None, urn=None):
     """Append a `DiagnosticTroubleCodeRead` from an adapter faults() result.
     De-dupes: unchanged (code, text, status) set since the last read for
     this module -> skip. Comparing more than just the code means a DTC
     table gaining a translation that was blank at capture time (or a
     status change like pending -> confirmed) still produces a fresh event
     even though the code set itself didn't change -- otherwise that
-    correction could never reach an already-synced passport."""
+    correction could never reach an already-synced passport.
+
+    `urn` (a garage vehicle's stable identity -- see diag_ui.py's connect()
+    vehicle picker) is preferred over `vin` when given, same convention as
+    ovpf_producer.resolve_log_path: a car connected without its VIN read
+    yet must still log against its own garage entry, not vin's "unknown"/
+    placeholder fallback."""
     if not faults_result or not faults_result.get("ok"):
         return None
     addr_hex = f"0x{addr:02X}"
@@ -157,7 +185,9 @@ def record_faults(vin, addr, module_name, faults_result, operator=None):
         return (c.get("code"), c.get("text", ""), c.get("status", ""))
 
     with _WRITE_LOCK:
-        path, urn = ensure_passport(vin)
+        path = _path_for_urn(urn) if urn else None
+        if not path:
+            path, urn = ensure_passport(vin)
         prev = _last_event(path, "DiagnosticTroubleCodeRead")
         if prev and prev.get("data", {}).get("module", {}).get("address") == addr_hex:
             prev_set = sorted(_key(c) for c in prev["data"].get("codes", []))
@@ -167,9 +197,12 @@ def record_faults(vin, addr, module_name, faults_result, operator=None):
             urn, "DiagnosticTroubleCodeRead", data, _stamp_operator(PRODUCER, operator)))
 
 
-def record_clear(vin, addr, module_name, operator=None):
-    """Append a `DiagnosticTroubleCodeCleared` (module-wide, `["*"]`)."""
-    path, urn = ensure_passport(vin)
+def record_clear(vin, addr, module_name, operator=None, urn=None):
+    """Append a `DiagnosticTroubleCodeCleared` (module-wide, `["*"]`).
+    `urn` preferred over `vin` -- see record_faults."""
+    path = _path_for_urn(urn) if urn else None
+    if not path:
+        path, urn = ensure_passport(vin)
     data = {"module": {"address": f"0x{addr:02X}", "name": module_name},
             "codesCleared": ["*"]}
     return ovpf_core.append(path, ovpf_core.envelope(

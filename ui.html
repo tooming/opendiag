@@ -617,6 +617,12 @@
 "use strict";
 const $ = id => document.getElementById(id);
 let state = { channels: [], protocol: null };
+// Garage-vehicle identity for the connected car while it has no VIN read
+// yet (see diag_ui.py's connect()/_current_urn()) -- set from /api/connect's
+// response, used so live actions (dyno saves, faults/clear -- those already
+// resolve server-side via ADAPTER.session_urn) and client-only bits like
+// saveDynoRun's live-pull path log against the right garage entry.
+let currentSessionUrn = null;
 let es = null, logSince = 0, charted = [], recOn = false;
 let sampleTimes = [];
 let lastPullActive = false, pulls = [];
@@ -645,6 +651,8 @@ async function api(path, body) {
 
 function setState(s) {
   state = s;
+  currentSessionUrn = s.session_urn || null;
+  if (s.needs_vehicle_pick) showVehiclePicker(s.vehicle_candidates || []);
   $("conn").textContent = s.connected ? "connected" : "disconnected";
   $("conn").className = "badge " + (s.connected ? "on" : "off");
   $("proto").textContent = s.name || (s.error || "");
@@ -698,6 +706,50 @@ function setState(s) {
   loadSnapshots();  // Load snapshots when state changes
   loadProtocolExplorer();  // Protocol Explorer summary
   showRam();  // RAM Explorer visibility
+}
+
+// Shown when connect() finds an unidentified car and more than one no-VIN
+// garage vehicle already exists -- genuinely ambiguous (could be a
+// different physical car than last time), see diag_ui.py's connect() and
+// /api/connect/assign_vehicle. Zero or one candidate resolves itself
+// server-side without ever showing this.
+function showVehiclePicker(candidates) {
+  const modal = document.createElement("div");
+  modal.style.cssText = "position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:1000;display:flex;align-items:center;justify-content:center";
+  const box = document.createElement("div");
+  box.style.cssText = "background:var(--bg);padding:20px;border-radius:4px;max-width:420px;max-height:80vh;overflow-y:auto";
+  const options = candidates.map(c =>
+    `<button class="vp-pick" data-urn="${wsEsc(c.urn)}" style="display:block;width:100%;text-align:left;margin-bottom:6px">${wsEsc(c.name || "(unnamed)")}</button>`
+  ).join("") || `<p class="muted">No existing unidentified vehicles.</p>`;
+  box.innerHTML = `
+    <h3 style="margin-top:0">Which vehicle is this?</h3>
+    <p class="muted" style="font-size:12px">This car hasn't had its VIN read yet, and there's more than one
+    unidentified vehicle already in your garage -- pick which one you just connected so scans, faults, and
+    pulls log to the right passport instead of a new/wrong one.</p>
+    <div style="margin:12px 0">${options}</div>
+    <div style="border-top:1px solid var(--line);padding-top:12px;margin-top:12px">
+      <input id="vp_nickname" placeholder="Nickname for a new vehicle" style="width:100%;margin-bottom:6px;box-sizing:border-box">
+      <button id="vp_new" style="width:100%">+ New vehicle</button>
+    </div>
+  `;
+  modal.appendChild(box);
+  document.body.appendChild(modal);
+  const finish = async (body) => {
+    const r = await api("/api/connect/assign_vehicle", body);
+    if (r && r.session_urn) {
+      currentSessionUrn = r.session_urn;
+      modal.remove();
+      loadDashboard();
+      loadGarage();
+    }
+  };
+  box.querySelectorAll(".vp-pick").forEach(btn => {
+    btn.onclick = () => finish({ urn: btn.dataset.urn });
+  });
+  box.querySelector("#vp_new").onclick = () => {
+    const nickname = box.querySelector("#vp_nickname").value.trim();
+    finish(nickname ? { new: true, nickname } : { new: true });
+  };
 }
 
 function chanById(id) { return (state.channels || []).find(c => c.id === id); }
@@ -2978,7 +3030,16 @@ async function saveDynoRun(curve, source, vin) {
   // nothing at all -- both silently landed in the wrong/"unknown"
   // passport before this existed).
   const body = { curve: { ...curve, source } };
-  if (vin) body.vin = vin;
+  if (vin) {
+    body.vin = vin;
+  } else if (currentSessionUrn) {
+    // Live pull from a car that hasn't had its VIN read yet -- target its
+    // garage entry (see connect()'s vehicle picker), not _current_vin()'s
+    // placeholder fallback (see the ovpf urn-awareness fixes for what that
+    // silently did before: every unidentified car's pulls piled into one
+    // shared passport).
+    body.urn = currentSessionUrn;
+  }
   const r = await api("/api/dyno/save", body);
   if (r && !r.error) loadDynoRuns();
   return r;
