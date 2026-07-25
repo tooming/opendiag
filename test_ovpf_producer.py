@@ -159,6 +159,56 @@ class ProducerTest(unittest.TestCase):
         vins = {s["vehicle"].get("vin") for s in prod.list_passports()}
         self.assertEqual(vins, {self.vin, "OTHERVIN00000002"})
 
+    def test_mint_passport_always_creates_a_distinct_file(self):
+        """Unlike ensure_passport(vin), which reuses one shared file for
+        any falsy/repeated vin, mint_passport() must never collide -- two
+        unidentified cars connected back to back get two separate
+        passports, not one shared bucket (the exact bug found live on the
+        E39: a module scan, a real fault, and its clear all landed in the
+        wrong passport)."""
+        path1, urn1 = prod.mint_passport()
+        path2, urn2 = prod.mint_passport()
+        self.assertNotEqual(urn1, urn2)
+        self.assertNotEqual(path1, path2)
+        for path in (path1, path2):
+            first = ovpf_core.load(path)[0]
+            self.assertEqual(first["type"], "PassportOpened")
+
+    def test_mint_passport_with_nickname_appends_vehicle_identified(self):
+        path, urn = prod.mint_passport(nickname="E39 838TGG")
+        events = ovpf_core.load(path)
+        self.assertEqual(len(events), 2)
+        self.assertEqual(events[1]["type"], "VehicleIdentified")
+        self.assertEqual(events[1]["data"]["vehicle"]["nickname"], "E39 838TGG")
+
+    def test_record_faults_prefers_urn_over_vin(self):
+        """A car connected without its VIN read yet must log against its
+        own garage entry (urn), not vin's placeholder/"unknown" fallback --
+        see diag_ui.py's connect() vehicle picker."""
+        _, urn = prod.mint_passport(nickname="Garage car")
+        r = {"ok": True, "entries": [{"code": "0x71", "text": "O2",
+                                      "status": "s", "raw": "71"}]}
+        ev = prod.record_faults("WBAXXXXXXXXXXXXXX", 0x12, "DME", r, urn=urn)
+        self.assertEqual(ev["vehicle"], urn)
+        # nothing leaked into the vin-keyed "unknown"/placeholder passport
+        self.assertIsNone(prod._read_first(prod._log_path("WBAXXXXXXXXXXXXXX")))
+
+    def test_record_clear_prefers_urn_over_vin(self):
+        _, urn = prod.mint_passport(nickname="Garage car")
+        ev = prod.record_clear("WBAXXXXXXXXXXXXXX", 0x80, "IKE", urn=urn)
+        self.assertEqual(ev["vehicle"], urn)
+        self.assertIsNone(prod._read_first(prod._log_path("WBAXXXXXXXXXXXXXX")))
+
+    def test_record_faults_falls_back_to_vin_when_urn_unresolvable(self):
+        """An urn that doesn't (yet) resolve to a real passport file (e.g.
+        stale client state) must not silently drop the event -- fall back
+        to the vin-keyed passport rather than erroring or losing data."""
+        r = {"ok": True, "entries": []}
+        ev = prod.record_faults(self.vin, 0x12, "DME", r,
+                                urn="urn:ovpf:00000000-0000-0000-0000-000000000000")
+        self.assertEqual(prod._read_first(prod._log_path(self.vin))["vehicle"],
+                         ev["vehicle"])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
