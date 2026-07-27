@@ -84,8 +84,9 @@ def find_port():
                 return p.device
         return None
     try:
-        out = subprocess.run(["ioreg", "-l", "-w0"], capture_output=True,
-                              text=True, timeout=5).stdout
+        raw = subprocess.run(["ioreg", "-l", "-w0"], capture_output=True,
+                              timeout=5).stdout
+        out = raw.decode("utf-8", "replace")
     except (OSError, subprocess.SubprocessError):
         out = ""
     last_vendor = None

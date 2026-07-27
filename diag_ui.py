@@ -38,6 +38,7 @@ import power_diag  # noqa: E402
 import ds2_diag    # noqa: E402
 import obd2        # noqa: E402  (shared Mode-01 PID decode formulas)
 import iso9141     # noqa: E402  (legacy pre-KWP2000 K-line OBD-II framing)
+import vag_diag     # noqa: E402  (CAN transport auto-select for VagAdapter)
 from power_diag import KLine, hexs, frame_payload, now  # noqa: E402
 from transaction import get_transaction_manager  # noqa: E402
 import coding  # noqa: E402
@@ -285,11 +286,36 @@ MS43_PROFILES = {
     ],
 }
 
+# MS42 (M52TU) profile: deliberately minimal, matching what
+# ds2_diag.MS42_ENGINE_PARAMS actually verifies (RPM + 2 raw/unverified
+# VANOS candidate bytes, see that comment for how they were isolated).
+# Both keys point at the same list -- "driveability" so a freshly-detected
+# MS42 (init defaults current_profile to "driveability") doesn't hit
+# _build_profile()'s KeyError-prone fallback, "vanos" so it also shows up
+# under the profile picker's existing VANOS option (ui.html).
+MS42_VANOS_CHANNELS = [
+    ("P8", "RPM", "Engine", True),
+    ("MS42_INJ_PW_RAW", "Injector PW?", "Fuel", True),
+    ("MS42_BATT_RAW", "Battery?", "Electrical", True),
+    ("MS42_TEMP_RAW", "Temp?", "Temps", True),
+    ("MS42_VANOS_IN_RAW", "VANOS Intake", "VANOS", True),
+    ("MS42_VANOS_EX_RAW", "VANOS Exhaust", "VANOS", True),
+    # power_kw/torque_nm are NOT listed here on purpose, same as every
+    # MS43 profile above -- they're synthetic and get appended by
+    # _build_profile() itself (see the maf_id_present block) whenever the
+    # active profile includes a MAF id, not by being named in this list.
+]
+MS42_PROFILES = {
+    "driveability": MS42_VANOS_CHANNELS,
+    "vanos": MS42_VANOS_CHANNELS,
+}
+
 # Which profile table applies to a detected DME. Falls back to MS41 for
-# anything without its own entry (MS42/ME7.2 have no param map at all per
-# dme_registry.py, so this choice is moot for them -- _load_dme_params()
+# anything without its own entry (ME7.2 has no param map at all per
+# dme_registry.py, so this choice is moot for it -- _load_dme_params()
 # already degrades to the MS41 id set in that case).
-PROFILES_BY_DME = {"MS41": MS41_PROFILES, "MS43": MS43_PROFILES}
+PROFILES_BY_DME = {"MS41": MS41_PROFILES, "MS43": MS43_PROFILES,
+                    "MS42": MS42_PROFILES}
 
 # The RomRaider expressions for switch params use BitWise()/! which our
 # safe-eval can't run — python-eval-able replacements, verified against the
@@ -366,6 +392,42 @@ def estimate_power_torque(maf_gps, rpm):
             round(torque_nm, 1) if torque_nm is not None else None)
 
 
+# MS42-only, and considerably rougher than estimate_power_torque(): no
+# verified MAF byte exists for this DME (the first candidate, offset 6,
+# looked plausible on a small idle-only sample but failed a real
+# accel/decel test on ~15,600 real driving samples -- see
+# ds2_diag.MS42_ENGINE_PARAMS' history). This instead estimates fuel mass
+# flow directly from injector pulse width (ds2_diag.MS42_INJ_PW_RAW,
+# offset 12-13 -- itself only a hypothesis, validated by the same
+# accel/decel signal-shape test, not a confirmed SGBD encoding) times an
+# assumed OEM injector static flow rate. Stacks THREE unverified
+# constants on top of each other (pulse-width scale, injector flow rate,
+# standard combustion efficiency) -- treat the result as a rough,
+# throttle-responsive ballpark, not a dyno-grade measurement.
+MS42_INJECTOR_PW_MS_PER_COUNT = 0.0053333  # borrowed from MS43_ENGINE_PARAMS' P99 (injector PW), unverified for MS42
+MS42_INJECTOR_FLOW_CC_MIN = 210.0  # typical E39 M52TU OEM injector static flow -- NOT confirmed for this specific car
+GASOLINE_DENSITY_G_CC = 0.75
+MS42_CYLINDERS = 6
+
+
+def estimate_power_torque_ms42(inj_pw_raw, rpm):
+    """See the module comment above this function for the full chain of
+    assumptions. Returns (power_kw, torque_nm), same shape as
+    estimate_power_torque()."""
+    pw_ms = inj_pw_raw * MS42_INJECTOR_PW_MS_PER_COUNT
+    fuel_g_per_injection = (pw_ms * MS42_INJECTOR_FLOW_CC_MIN
+                             * GASOLINE_DENSITY_G_CC / 60000.0)
+    injections_per_sec = (rpm / 120.0) if rpm else 0  # once per cyl per 2 crank revs
+    fuel_g_s = fuel_g_per_injection * MS42_CYLINDERS * injections_per_sec
+    power_kw = fuel_g_s * GASOLINE_LHV_KJ_PER_G * BRAKE_THERMAL_EFFICIENCY
+    torque_nm = None
+    if rpm and rpm > 50:
+        omega = rpm * 2 * math.pi / 60
+        torque_nm = power_kw * 1000 / omega
+    return (round(power_kw, 1),
+            round(torque_nm, 1) if torque_nm is not None else None)
+
+
 class E39Adapter:
     """DS2 protocol (1998 523i)."""
     name = "E39 (DS2 9600 8E1)"
@@ -404,6 +466,17 @@ class E39Adapter:
                 **{b["id"]: b for b in ds2_diag.MS43_DIGITAL_BITS},
             }
             return
+        if descriptor.get("dme") == "MS42":
+            # Same fixed-status-group mechanism as MS43, far smaller
+            # verified field set (see ds2_diag.MS42_ENGINE_PARAMS) -- no
+            # RAM address list either, so this also bypasses
+            # dme_registry.load_params() rather than falling through to
+            # the MS41 RAM-address fallback below (which was silently
+            # misreading this DME before this branch existed -- garbage
+            # RPM/voltage/coolant values, since MS41's RAM addresses mean
+            # nothing on an MS42).
+            self._all_params = {p["id"]: p for p in ds2_diag.MS42_ENGINE_PARAMS}
+            return
         import dme_registry
         plist = dme_registry.load_params(
             descriptor, part_number=descriptor.get("matched_part"))
@@ -432,7 +505,7 @@ class E39Adapter:
         self.live_channels = []
         params = []
 
-        if self.dme.get("dme") == "MS43":
+        if self.dme.get("dme") in ("MS43", "MS42"):
             for pid, label, group, graph in profile_table[profile]:
                 p = self._all_params.get(pid)
                 if p is None:
@@ -441,7 +514,9 @@ class E39Adapter:
                     {"id": pid, "label": label, "group": group,
                      "unit": p.get("units", ""), "graph": graph})
                 params.append(p)
-            self.logger = ds2_diag.MS43StatusLogger(self.ds2)
+            self.logger = (ds2_diag.MS43StatusLogger(self.ds2)
+                            if self.dme.get("dme") == "MS43"
+                            else ds2_diag.MS42StatusLogger(self.ds2))
             # No ADC-procedure concept in this fixed status-group mechanism
             # (unlike MS41Logger's arm list) -- 0/N just means "none of
             # these are ADC reads", not that anything's missing.
@@ -478,17 +553,28 @@ class E39Adapter:
             self.live_channels.append(
                 {"id": "vanos_state", "label": "VANOS State",
                  "group": "VANOS", "unit": "", "graph": False})
-        if any(p["id"] == "P12" for p in params) and any(p["id"] == "P8" for p in params):
-            # synthetic channels computed by live_sample() from P12 (MAF)
-            # + P8 (RPM) via estimate_power_torque(), same physics-based
-            # estimate as the E87. Both ids are reused as-is for MS43 (see
+        maf_id_present = any(p["id"] in ("P12", "MS42_INJ_PW_RAW") for p in params)
+        if maf_id_present and any(p["id"] == "P8" for p in params):
+            # synthetic channels computed by live_sample() from MAF + P8
+            # (RPM) via estimate_power_torque(), same physics-based
+            # estimate as the E87. P12 is reused as-is for MS43 (see
             # MS43_ENGINE_PARAMS) specifically so this keeps working there.
+            # MS42 has no confirmed MAF byte at all (the first guess,
+            # offset 6, was disproven -- see ds2_diag.MS42_ENGINE_PARAMS)
+            # so live_sample() instead derives fuel flow from an injector
+            # pulse-width candidate via estimate_power_torque_ms42(),
+            # itself stacking several more unverified constants -- label
+            # accordingly rather than presenting it with the same
+            # confidence as the MS41/MS43 estimate.
+            rough = self.dme.get("dme") == "MS42"
             self.live_channels.append(
-                {"id": "power_kw", "label": "Est. Crank Power", "unit": "kW",
-                 "group": "Engine", "graph": True})
+                {"id": "power_kw",
+                 "label": "Est. Crank Power (rough)" if rough else "Est. Crank Power",
+                 "unit": "kW", "group": "Engine", "graph": True})
             self.live_channels.append(
-                {"id": "torque_nm", "label": "Est. Crank Torque", "unit": "Nm",
-                 "group": "Engine", "graph": True})
+                {"id": "torque_nm",
+                 "label": "Est. Crank Torque (rough)" if rough else "Est. Crank Torque",
+                 "unit": "Nm", "group": "Engine", "graph": True})
 
     def set_profile(self, profile_name):
         """Switch to a different logging profile and re-arm the logger."""
@@ -592,6 +678,16 @@ class E39Adapter:
         if maf_kgh is not None:
             maf_gps = maf_kgh * 1000 / 3600
             pw, tq = estimate_power_torque(maf_gps, s.get("P8") or 0)
+            if pw is not None:
+                s["power_kw"] = pw
+            if tq is not None:
+                s["torque_nm"] = tq
+        elif "MS42_INJ_PW_RAW" in s:
+            # See estimate_power_torque_ms42()'s comment -- no verified
+            # MAF byte exists for this DME, this goes through injector
+            # pulse width instead, on several more unverified constants.
+            pw, tq = estimate_power_torque_ms42(
+                s["MS42_INJ_PW_RAW"], s.get("P8") or 0)
             if pw is not None:
                 s["power_kw"] = pw
             if tq is not None:
@@ -1433,6 +1529,122 @@ class Iso9141Adapter(Obd2Adapter):
         return s
 
 
+class VagAdapter:
+    """VW Group (Octavia Mk3/MQB and similar) over CAN -- ISO 15765-4
+    OBD-II (SAE J1979), exactly the same legislated Mode 01/03/04/09 layer
+    Obd2Adapter/Iso9141Adapter speak over K-line, just over a CAN
+    transport instead (can_transport.SlcanPort or can_transport_waveshare.
+    WaveshareCanPort, auto-picked the same way vag_diag.py's own CLI does
+    -- see vag_diag.open_port()). Same PID math (obd2.decode_pid) as every
+    other adapter here, so live-data/health-tile support comes for free.
+
+    More than one ECU answers the functional broadcast on this car
+    (confirmed live: 0x7E8 engine, 0x7E9 transmission) -- handled the same
+    way Iso9141Adapter already handles its own multi-responder K-line bus:
+    scan()/faults() report every responder, live_sample() tracks whichever
+    has the most PID support as self._src. No coding/adaptations (no
+    manufacturer module map here, only the legislated OBD-II layer) --
+    same limitation Obd2Adapter/Iso9141Adapter already have."""
+    name = "VW Group (Octavia Mk3/MQB and similar, CAN)"
+    proto = "vag"
+    vin = "VAGXXXXXXXXXXXXXXX"
+    vin_placeholder = "VAGXXXXXXXXXXXXXXX"
+    # Verified responder IDs on this car; any other MQB responder still
+    # works fine via modules.get(addr, fallback) at the call sites.
+    modules = {0x7E8: "Engine control (OBD-II functional broadcast, CAN)",
+               0x7E9: "Transmission control (OBD-II functional broadcast, CAN)"}
+    live_channels = list(Obd2Adapter.live_channels)
+    _PID_CHANNELS = dict(Obd2Adapter._PID_CHANNELS)
+
+    def __init__(self):
+        self.port = vag_diag.open_port(
+            "auto", rawlog_path=os.path.join(DATA, "can_raw.log"))
+        self._src = None
+        self._supported = {}
+
+    def close(self):
+        self.port.close()
+
+    def detect(self):
+        raw = obd2.request_functional(self.port, obd2.MODE_CURRENT_DATA,
+                                      pid=0x00, timeout=1.0)
+        if not raw:
+            return False
+        v = obd2.read_vin(self.port)
+        if v:
+            self.vin = v
+        return True
+
+    def scan(self):
+        self._supported = obd2.supported_pids_by_responder(self.port)
+        if self._supported:
+            self._src = max(self._supported, key=lambda s: len(self._supported[s]))
+        return [{"addr": src,
+                "name": self.modules.get(src, f"OBD-II responder 0x{src:03X}")
+                        + (" (primary)" if src == self._src else ""),
+                "ident": f"{len(pids)} Mode-01 PIDs supported",
+                "ident_ascii": " ".join(f"{p:02X}" for p in pids)}
+               for src, pids in sorted(self._supported.items())]
+
+    def faults(self, addr):
+        dtcs = obd2.read_dtcs(self.port, timeout=1.0)
+        if addr not in dtcs:
+            return {"ok": False, "error": "no response to DTC read"}
+        codes = dtcs[addr]
+        entries = [{"code": c, "raw": c, "text": "", "status": ""}
+                  for c in codes]
+        return {"ok": True, "count": len(entries), "entries": entries,
+                "raw": ""}
+
+    def clear(self, addr):
+        obd2.clear_dtcs(self.port, timeout=2.0)
+        time.sleep(0.5)
+        after = self.faults(addr)
+        cleared = bool(after.get("ok")) and after.get("count", 1) == 0
+        return {"ok": cleared,
+                "status": "cleared" if cleared else "no answer",
+                "after": after}
+
+    def live_sample(self):
+        if self._src is None:
+            self._supported = obd2.supported_pids_by_responder(self.port)
+            if self._supported:
+                self._src = max(self._supported,
+                                key=lambda s: len(self._supported[s]))
+        if self._src is None:
+            return {}
+        supported_here = set(self._supported.get(self._src, []))
+        # stop_ids={self._src}: return as soon as our one known ECU answers
+        # instead of waiting the full timeout for every possible responder
+        # every single channel -- see request_functional()'s docstring for
+        # why this matters here specifically.
+        stop_ids = {self._src}
+        s = {}
+        for chan_id, pid in self._PID_CHANNELS.items():
+            if supported_here and pid not in supported_here:
+                continue  # known-unsupported on this ECU -- don't wait on it
+            raw = obd2.read_pid(self.port, pid, timeout=0.2, stop_ids=stop_ids)
+            d = raw.get(self._src)
+            if d:
+                s[chan_id] = round(obd2.decode_pid(pid, d), 2)
+        if not supported_here or 0x03 in supported_here:
+            raw = obd2.read_pid(self.port, 0x03, timeout=0.2, stop_ids=stop_ids)
+            d = raw.get(self._src) if raw else None
+            if d:
+                txt = obd2.decode_fuel_system_status(d[0])
+                if txt:
+                    s["fuel_status"] = txt
+        if "maf" in s:
+            pw, tq = estimate_power_torque(s["maf"], s.get("rpm") or 0)
+            if pw is not None:
+                s["power_kw"] = pw
+            if tq is not None:
+                s["torque_nm"] = tq
+        if not s:
+            self._src = None  # force re-detect of supported PIDs next time
+        return s
+
+
 ADAPTER = None            # current protocol adapter
 ADAPTER_ERR = ""
 
@@ -1566,6 +1778,16 @@ def gather_vehicle_info():
         # genuinely known (that's what selected this Adapter), the actual
         # car isn't. Report which ECU addresses answered instead.
         vehicle_info["model"] = "Unknown (legacy OBD-II, ISO 9141-2)"
+        vehicle_info["engine"] = None
+        vehicle_info["engine_evidence"] = "not auto-detected"
+        vehicle_info["responders"] = sorted(getattr(ADAPTER, "_supported", {}))
+
+    elif ADAPTER.proto == "vag":
+        # Unlike the E87/E39/obd2/iso9141 branches above, this codebase
+        # only targets one specific VAG car (see CLAUDE.md) -- no shared-
+        # codepath ambiguity to avoid guessing around, so a fixed model
+        # label is accurate rather than a guess.
+        vehicle_info["model"] = "Skoda Octavia Mk3 (MQB)"
         vehicle_info["engine"] = None
         vehicle_info["engine_evidence"] = "not auto-detected"
         vehicle_info["responders"] = sorted(getattr(ADAPTER, "_supported", {}))
@@ -2203,10 +2425,18 @@ def connect(proto="auto"):
         if ADAPTER:
             ADAPTER.close()
             ADAPTER = None
-        order = {"auto": [E39Adapter, E87Adapter, Obd2Adapter, Iso9141Adapter],
+        # VagAdapter first: its constructor raises fast (vag_diag.
+        # CanPortError) when no CAN adapter is plugged in, and trying it
+        # before the K-line adapters avoids them wasting time probing the
+        # CAN adapter's CH340 port (which enumerates the same way as the
+        # K+DCAN cable's FTDI port on macOS -- see can_transport_waveshare.
+        # find_port()'s docstring).
+        order = {"auto": [VagAdapter, E39Adapter, E87Adapter, Obd2Adapter,
+                          Iso9141Adapter],
                  "demo": [DemoAdapter],
                  "e39": [E39Adapter], "e87": [E87Adapter],
-                 "obd2": [Obd2Adapter], "iso9141": [Iso9141Adapter]}[proto]
+                 "obd2": [Obd2Adapter], "iso9141": [Iso9141Adapter],
+                 "vag": [VagAdapter]}[proto]
         errs = []
         for cls in order:
             try:

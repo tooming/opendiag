@@ -44,7 +44,45 @@ import obd2
 from isotp import IsoTpError
 from uds import Uds, UdsError, decode_dtc_records, dtc_to_text
 
-CanPortError = (SlcanError, WaveshareCanError)
+class CanAdapterError(Exception):
+    pass
+
+
+CanPortError = (SlcanError, WaveshareCanError, CanAdapterError)
+
+
+def open_port(adapter="auto", port=None, bitrate=500000, show_raw=False,
+              rawlog_path=None):
+    """Open the right CAN transport for --adapter (or auto-detect between
+    a CANable-class slcan adapter and a Waveshare USB-CAN-A, the same way
+    this module's CLI does). Shared with diag_ui.py's VagAdapter so the
+    hardware-selection logic lives in exactly one place. Raises
+    CanAdapterError if the choice is ambiguous or nothing is plugged in,
+    SlcanError/WaveshareCanError if the chosen adapter itself fails to
+    open."""
+    if adapter == "auto":
+        has_slcan = bool(find_slcan_port())
+        has_waveshare = bool(find_waveshare_port())
+        if has_slcan and has_waveshare:
+            raise CanAdapterError(
+                "both a CANable-class (slcan) and a Waveshare USB-CAN-A "
+                "adapter appear to be plugged in — pass adapter='slcan' or "
+                "adapter='waveshare' to disambiguate")
+        elif has_slcan:
+            adapter = "slcan"
+        elif has_waveshare:
+            adapter = "waveshare"
+        else:
+            raise CanAdapterError(
+                "no USB-CAN adapter found (looked for a CANable-class "
+                "/dev/cu.usbmodem* device and a Waveshare USB-CAN-A CH340 "
+                "device) — is it plugged in? the K+DCAN cable will not "
+                "work here, it has no CAN transceiver")
+    if adapter == "slcan":
+        return SlcanPort(port, bitrate=bitrate, show_raw=show_raw,
+                          rawlog_path=rawlog_path)
+    return WaveshareCanPort(port, bitrate=bitrate, show_raw=show_raw,
+                            rawlog_path=rawlog_path)
 
 DATA_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -215,31 +253,9 @@ def main():
     args = ap.parse_args()
 
     rawlog = os.path.join(DATA_DIR, "can_raw.log")
-    adapter = args.adapter
-    if adapter == "auto":
-        has_slcan = bool(find_slcan_port())
-        has_waveshare = bool(find_waveshare_port())
-        if has_slcan and has_waveshare:
-            sys.exit("both a CANable-class (slcan) and a Waveshare "
-                     "USB-CAN-A adapter appear to be plugged in — pass "
-                     "--adapter slcan or --adapter waveshare to disambiguate")
-        elif has_slcan:
-            adapter = "slcan"
-        elif has_waveshare:
-            adapter = "waveshare"
-        else:
-            sys.exit("no USB-CAN adapter found (looked for a CANable-class "
-                     "/dev/cu.usbmodem* device and a Waveshare USB-CAN-A "
-                     "CH340 device) — is it plugged in? the K+DCAN cable "
-                     "will not work here, it has no CAN transceiver")
-
     try:
-        if adapter == "slcan":
-            port = SlcanPort(args.port, bitrate=args.bitrate,
-                             show_raw=args.raw, rawlog_path=rawlog)
-        else:
-            port = WaveshareCanPort(args.port, bitrate=args.bitrate,
-                                    show_raw=args.raw, rawlog_path=rawlog)
+        port = open_port(args.adapter, args.port, bitrate=args.bitrate,
+                         show_raw=args.raw, rawlog_path=rawlog)
     except CanPortError as e:
         sys.exit(str(e))
 

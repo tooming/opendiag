@@ -102,10 +102,25 @@ def _send_sf(port, can_id, payload):
     port.send_frame(can_id, frame)
 
 
-def request_functional(port, mode, pid=None, timeout=0.6):
+def request_functional(port, mode, pid=None, timeout=0.6, stop_ids=None):
     """Broadcast a Mode 0x0N request and collect every responder's payload
     (mode+pid echo stripped), reassembling multi-frame responses. Returns
-    {responder_can_id: payload_bytes}."""
+    {responder_can_id: payload_bytes}.
+
+    stop_ids: optional set of responder CAN IDs -- if given, return as
+    soon as every one of them has a complete result, instead of always
+    waiting out the full timeout to give every possible responder a
+    chance to answer (the default, still used when stop_ids is None --
+    read_dtcs()/read_vin()/supported_pids_by_responder() want a complete
+    picture across every ECU and aren't called in a hot loop, so they
+    keep that behavior). Lets a caller that already knows which single
+    ECU it cares about (live_sample() polling a known responder every
+    cycle) skip waiting on responders it doesn't need: confirmed live on
+    the Octavia that without this, every single-PID round trip took the
+    entire timeout (0.301s measured for timeout=0.3) even though both the
+    engine and transmission ECUs had already answered within
+    milliseconds -- this is what made live_sample() polling ~15 channels
+    per cycle so slow, not any actual bus/hardware limit."""
     positive_sid = mode + 0x40
     skip = 1 if pid is None else 2
     port.drain_rx()
@@ -115,6 +130,8 @@ def request_functional(port, mode, pid=None, timeout=0.6):
     pending = {}  # resp_id -> [total_len, bytearray, next_seq]
     deadline = time.time() + timeout
     while time.time() < deadline or pending:
+        if stop_ids and not pending and stop_ids <= results.keys():
+            break
         remaining = max(0.0, deadline - time.time()) if time.time() < \
             deadline else 0.3
         f = port.recv_frame(remaining)
@@ -200,9 +217,40 @@ def read_vin(port, timeout=1.0):
     return None
 
 
-def read_pid(port, pid, timeout=0.6):
+def read_pid(port, pid, timeout=0.6, stop_ids=None):
     return request_functional(port, MODE_CURRENT_DATA, pid=pid,
-                               timeout=timeout)
+                               timeout=timeout, stop_ids=stop_ids)
+
+
+def supported_pids_by_responder(port, timeout=0.6):
+    """{responder_can_id: [pid, ...]} -- walk PIDs 0x00/0x20/0x40/... per
+    responding ECU separately, since more than one module can answer the
+    functional broadcast (confirmed live on the Octavia: 0x7E8 engine,
+    0x7E9 transmission, each supporting a different PID set). Same
+    algorithm as iso9141.supported_pids(), which needs this per-source
+    breakdown for the same reason -- more than one ECU on that bus too."""
+    result = {}
+    base = 0x00
+    while True:
+        raw = request_functional(port, MODE_CURRENT_DATA, pid=base,
+                                  timeout=timeout)
+        if not raw:
+            break
+        more = False
+        for can_id, data in raw.items():
+            if len(data) < 4:
+                continue
+            bits = int.from_bytes(data[:4], "big")
+            pids = result.setdefault(can_id, set())
+            for i in range(32):
+                if bits & (1 << (31 - i)):
+                    pids.add(base + i + 1)
+            if bits & 1:
+                more = True
+        if not more or base >= 0xE0:
+            break
+        base += 0x20
+    return {can_id: sorted(pids) for can_id, pids in result.items()}
 
 
 def supported_pids(port, timeout=0.6):
