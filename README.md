@@ -113,11 +113,22 @@ Modern VAG cars — this covers a **2019 Skoda Octavia (Mk3/MQB)** — don't
 have K-line at all; every module is on the CAN bus and speaks UDS
 (ISO 14229) over ISO-TP (ISO 15765-2). The K+DCAN cable **cannot** be
 reused here (no CAN transceiver, and MQB cars don't wire K-line to any
-module). You need a CAN-capable adapter instead — a **CANable 2.0-class
-USB-CAN adapter running the stock slcan firmware** (~€15-20) is the
-recommended fit: it enumerates as a plain `/dev/cu.usbmodem*` serial port
-on macOS, no drivers, and speaks a simple ASCII protocol implemented here
-stdlib-only (`can_transport.py`), same philosophy as the K-line tools.
+module). You need a CAN-capable adapter instead. Two are supported,
+picked automatically (or via `--adapter slcan|waveshare`):
+
+- A **CANable 2.0-class USB-CAN adapter running the stock slcan
+  firmware**: enumerates as a plain `/dev/cu.usbmodem*` serial port on
+  macOS, no drivers, speaks a simple ASCII protocol implemented here
+  stdlib-only (`can_transport.py`).
+- A **Waveshare USB-CAN-A** (~€15-20, the adapter actually used/verified
+  on this project's Octavia): CH340-based, enumerates as
+  `/dev/cu.usbserial-*` and speaks its own binary framing instead of
+  slcan (`can_transport_waveshare.py`, also stdlib-only) — see that
+  module's docstring for the wire protocol.
+
+Either way it's the same philosophy as the K-line tools: raw serial,
+no third-party drivers, and `isotp.py`/`obd2.py`/`uds.py` don't care which
+one is plugged in.
 
 ```sh
 python3 vag_diag.py probe    # bus alive? (Mode 01 PID 00 broadcast)
@@ -145,7 +156,8 @@ Two layers, deliberately kept separate:
   trusting a guessed table. Confirmed addresses belong in
   `vehicle_profiles.py`'s `octavia_mk3` entry once verified on the car.
 
-`--raw` prints every SLCAN line on the wire; all traffic is appended to
+`--raw` prints every line/frame on the wire (format depends on the adapter
+in use); all traffic is appended to
 `can_raw.log`. `clear` auto-snapshots fault memory to `fault_snapshots.log`
 first, same as the BMW tools — never clear without that evidence captured.
 

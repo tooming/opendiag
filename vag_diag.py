@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """VW Group (Octavia Mk3/MQB and similar) diagnostics over a CAN-capable
-USB adapter (CANable 2.0-class, slcan firmware) on macOS.
+USB adapter on macOS. Two adapter types are supported (--adapter, default
+auto-detect): a CANable 2.0-class adapter running stock slcan firmware
+(can_transport.SlcanPort), or a Waveshare USB-CAN-A, which is CH340-based
+and speaks its own binary framing instead (can_transport_waveshare.
+WaveshareCanPort) — see that module's docstring for the wire protocol.
 
 The K+DCAN cable used elsewhere in this repo is K-line only and cannot
 reach this car — see CLAUDE.md. This talks ISO 15765-4 (OBD-II on CAN,
@@ -23,8 +27,8 @@ Modes:
            which raw CAN IDs get a reply, the same way power_diag.py's
            K-line `sweep` finds BMW module addresses on an unknown car.
 
-Use --raw to print every SLCAN line on the wire; all traffic is also
-appended to can_raw.log.
+Use --raw to print every line/frame on the wire (format depends on the
+adapter in use); all traffic is also appended to can_raw.log.
 """
 import argparse
 import csv
@@ -33,10 +37,14 @@ import os
 import sys
 import time
 
-from can_transport import SlcanPort, SlcanError
+from can_transport import SlcanPort, SlcanError, find_port as find_slcan_port
+from can_transport_waveshare import (WaveshareCanPort, WaveshareCanError,
+                                      find_port as find_waveshare_port)
 import obd2
 from isotp import IsoTpError
 from uds import Uds, UdsError, decode_dtc_records, dtc_to_text
+
+CanPortError = (SlcanError, WaveshareCanError)
 
 DATA_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -133,7 +141,7 @@ def mode_sweep(port, lo=0x700, hi=0x7FF, quiet_no_dtc=False):
                 print(f" (DTC read failed: {e})")
         except (IsoTpError, UdsError):
             pass
-        except SlcanError:
+        except CanPortError:
             raise
     if not found and not quiet_no_dtc:
         print("no additional responders found in the swept range")
@@ -178,10 +186,17 @@ def main():
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--port", default=None,
                     help="serial port (auto-detected if omitted)")
+    ap.add_argument("--adapter", choices=["auto", "slcan", "waveshare"],
+                    default="auto",
+                    help="CAN adapter type: slcan (CANable-class, "
+                    "stock slcan firmware) or waveshare (Waveshare "
+                    "USB-CAN-A, CH340-based binary protocol). Default "
+                    "auto-detects from what's plugged in.")
     ap.add_argument("--bitrate", type=int, default=500000,
                     help="CAN bitrate, default 500000 (standard for MQB)")
     ap.add_argument("--raw", action="store_true",
-                    help="print raw SLCAN lines on the wire")
+                    help="print raw wire traffic (SLCAN lines or "
+                    "Waveshare frame bytes, depending on adapter)")
     sub = ap.add_subparsers(dest="mode", required=True)
     sub.add_parser("probe")
     sub.add_parser("pids")
@@ -200,10 +215,32 @@ def main():
     args = ap.parse_args()
 
     rawlog = os.path.join(DATA_DIR, "can_raw.log")
+    adapter = args.adapter
+    if adapter == "auto":
+        has_slcan = bool(find_slcan_port())
+        has_waveshare = bool(find_waveshare_port())
+        if has_slcan and has_waveshare:
+            sys.exit("both a CANable-class (slcan) and a Waveshare "
+                     "USB-CAN-A adapter appear to be plugged in — pass "
+                     "--adapter slcan or --adapter waveshare to disambiguate")
+        elif has_slcan:
+            adapter = "slcan"
+        elif has_waveshare:
+            adapter = "waveshare"
+        else:
+            sys.exit("no USB-CAN adapter found (looked for a CANable-class "
+                     "/dev/cu.usbmodem* device and a Waveshare USB-CAN-A "
+                     "CH340 device) — is it plugged in? the K+DCAN cable "
+                     "will not work here, it has no CAN transceiver")
+
     try:
-        port = SlcanPort(args.port, bitrate=args.bitrate, show_raw=args.raw,
-                         rawlog_path=rawlog)
-    except SlcanError as e:
+        if adapter == "slcan":
+            port = SlcanPort(args.port, bitrate=args.bitrate,
+                             show_raw=args.raw, rawlog_path=rawlog)
+        else:
+            port = WaveshareCanPort(args.port, bitrate=args.bitrate,
+                                    show_raw=args.raw, rawlog_path=rawlog)
+    except CanPortError as e:
         sys.exit(str(e))
 
     try:
