@@ -4,7 +4,7 @@
 Single source of truth for: canonicalization, event hashing, monotonic
 UUIDv7 ids, the event envelope, lock-guarded append, and the fold
 (seal/verify/merge/reduce). Both the reference CLI (`ovpf.py`) and the
-diagnostic app's producer (`opendiag/ovpf_producer.py`, a vendored copy)
+diagnostic app's producer (`garagediag/ovpf_producer.py`, a vendored copy)
 import this, so there is exactly one implementation of the wire format.
 
 Stdlib only. Keep the two copies byte-identical (a golden-hash test guards
@@ -299,7 +299,7 @@ def reduce(events):
             "at": ev.get("occurredAt"), "type": t,
             "producer": p.get("name"),
             # Who was actually signed in and running the tool, distinct
-            # from producer.name/type (the tool + mechanism, e.g. opendiag
+            # from producer.name/type (the tool + mechanism, e.g. garagediag
             # + a Diagnostic ECU read) -- optional spec field (OVPF.md),
             # None for the common fully-anonymous case.
             "operator": p.get("operator"),

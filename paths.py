@@ -11,7 +11,7 @@ PyInstaller:
 * **data_dir()** — writable runtime data (kline_raw.log, drive/​power logs,
   fault snapshots, the VIN backup tree, verified_maps.json). In a frozen
   build the project dir is read-only/ephemeral, so these must live in a
-  persistent per-user folder (``%APPDATA%\\OpenDiag`` on Windows). The
+  persistent per-user folder (``%APPDATA%\\GarageDiag`` on Windows). The
   backup tree in particular MUST persist — it's the safety net behind every
   module write.
 
@@ -48,22 +48,29 @@ def _user_data_base():
 def data_dir():
     """Directory for writable runtime data (created if missing).
 
-    Was named "BMWDiag" (pre-rename); a frozen build's existing users have
-    real data there (backups, drive logs, cloud_session.json) that a plain
-    rename to "OpenDiag" would silently orphan. One-time migration: if the
-    old folder exists and the new one doesn't yet, move it rather than
-    starting fresh."""
+    Renamed twice: "BMWDiag" (original) -> "OpenDiag" -> "GarageDiag"
+    (current -- dropped "OpenDiag" after finding an unrelated, unaffiliated
+    commercial diagnostics product already using that name, opendiag.pro).
+    A frozen build's existing users have real data under whichever of
+    those a previous version created (backups, drive logs,
+    cloud_session.json) that starting fresh under the new name would
+    silently orphan. One-time migration: if the current folder doesn't
+    exist yet, look for the most recent legacy name that does and move it,
+    rather than starting empty."""
     if not is_frozen():
         return _HERE
     base = _user_data_base()
-    new_d = os.path.join(base, "OpenDiag")
-    old_d = os.path.join(base, "BMWDiag")
-    if not os.path.isdir(new_d) and os.path.isdir(old_d):
-        try:
-            os.rename(old_d, new_d)
-        except OSError:
-            os.makedirs(old_d, exist_ok=True)
-            return old_d  # cross-device or permission issue -- keep using it
+    new_d = os.path.join(base, "GarageDiag")
+    if not os.path.isdir(new_d):
+        for legacy in ("OpenDiag", "BMWDiag"):
+            old_d = os.path.join(base, legacy)
+            if os.path.isdir(old_d):
+                try:
+                    os.rename(old_d, new_d)
+                except OSError:
+                    os.makedirs(old_d, exist_ok=True)
+                    return old_d  # cross-device/permission issue -- keep using it
+                break
     os.makedirs(new_d, exist_ok=True)
     return new_d
 
@@ -77,7 +84,7 @@ def app_version():
     """Best-effort build identifier, for stamping onto reports/exports so
     they can be tied back to the exact code that produced them.
 
-    Frozen builds have no .git inside the bundle, so opendiag.spec bakes a
+    Frozen builds have no .git inside the bundle, so garagediag.spec bakes a
     version.txt resource in at build time; running from source (the normal
     dev case) always has .git available, so ask it directly instead of
     relying on a stale baked-in file."""

@@ -31,13 +31,13 @@ import paths
 _WRITE_LOCK = threading.RLock()   # reentrant: record_* call ensure_passport
 
 VERSION = "0.1.0"
-PRODUCER = {"type": "Diagnostic", "name": "opendiag", "version": VERSION,
+PRODUCER = {"type": "Diagnostic", "name": "garagediag", "version": VERSION,
             "device": "K+DCAN FTDI"}
-MANUAL = {"type": "Manual", "name": "opendiag", "version": VERSION}
+MANUAL = {"type": "Manual", "name": "garagediag", "version": VERSION}
 
 
 def _stamp_operator(base, operator):
-    """`producer.name`/`type` describe the tool and the mechanism (opendiag,
+    """`producer.name`/`type` describe the tool and the mechanism (garagediag,
     a Diagnostic read) -- distinct from `producer.operator` (OVPF.md's
     spec field), who was actually signed in and running it. Every record_*
     function below takes an optional `operator` (the caller -- diag_ui.py,

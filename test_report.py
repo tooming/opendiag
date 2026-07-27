@@ -122,7 +122,7 @@ class MarkdownRenderTest(unittest.TestCase):
     def test_renders_without_crashing_on_minimal_report(self):
         rep = report.build_report([], vin_override=None)
         md = report.to_markdown(rep)
-        self.assertIn("OpenDiag Diagnostic Report", md)
+        self.assertIn("GarageDiag Diagnostic Report", md)
         self.assertIn("Not identified", md)
 
 

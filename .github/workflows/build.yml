@@ -16,11 +16,11 @@ jobs:
       matrix:
         include:
           - os: macos-latest
-            artifact: OpenDiag-macos
-            bundle: OpenDiag.app
+            artifact: GarageDiag-macos
+            bundle: GarageDiag.app
           - os: windows-latest
-            artifact: OpenDiag-windows
-            bundle: OpenDiag.exe
+            artifact: GarageDiag-windows
+            bundle: GarageDiag.exe
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -35,7 +35,7 @@ jobs:
           pip install pyinstaller pywebview pyserial segno certifi
 
       - name: Build frozen app
-        run: pyinstaller --noconfirm opendiag.spec
+        run: pyinstaller --noconfirm garagediag.spec
 
       - name: Package artifact
         shell: bash

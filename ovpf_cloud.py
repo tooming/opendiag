@@ -42,7 +42,7 @@ def _ssl_context():
     store the way a source-run interpreter does -- urlopen() then fails
     every HTTPS request with CERTIFICATE_VERIFY_FAILED.
 
-    Prefer the CA bundle opendiag.spec copies in as a plain resource file
+    Prefer the CA bundle garagediag.spec copies in as a plain resource file
     (read back via paths.resource_dir(), same mechanism as ui.html) over
     calling certifi.where() directly: a pure-Python package's own
     __file__-relative path resolution isn't reliable once PyInstaller has

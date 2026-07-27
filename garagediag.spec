@@ -1,9 +1,9 @@
 # -*- mode: python ; coding: utf-8 -*-
 """PyInstaller spec — builds the desktop app frozen and self-contained.
 
-  pyinstaller --noconfirm opendiag.spec
+  pyinstaller --noconfirm garagediag.spec
 
-Produces `dist/OpenDiag.exe` on Windows and `dist/OpenDiag.app` on macOS.
+Produces `dist/GarageDiag.exe` on Windows and `dist/GarageDiag.app` on macOS.
 The read-only tables + ui.html are bundled as data (found via
 paths.resource_dir() -> sys._MEIPASS at runtime); writable data (logs,
 backups) goes to a per-user folder via paths.data_dir().
@@ -40,7 +40,7 @@ try:
 except (OSError, subprocess.SubprocessError):
     _version = 'unknown'
 # Human-friendly counterpart of _version for the macOS bundle's
-# CFBundleShortVersionString (the native "About OpenDiag" panel reads that
+# CFBundleShortVersionString (the native "About GarageDiag" panel reads that
 # plist field directly, not version.txt) -- resolves to the release tag
 # (e.g. "v0.8.24") on a tagged build, or "<tag>-<n>-g<sha>" between tags.
 try:
@@ -95,16 +95,16 @@ if sys.platform == 'darwin':
     # onedir + BUNDLE -> a proper .app (onefile .app clashes with Gatekeeper)
     exe = EXE(
         pyz, a.scripts, [], exclude_binaries=True,
-        name='OpenDiag', debug=False, strip=False, upx=False,
+        name='GarageDiag', debug=False, strip=False, upx=False,
         console=False, disable_windowed_traceback=False,
     )
     coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False,
-                   name='OpenDiag')
+                   name='GarageDiag')
     app = BUNDLE(
         coll,
-        name='OpenDiag.app',
+        name='GarageDiag.app',
         icon='app.icns',
-        bundle_identifier='com.tooming.opendiag',
+        bundle_identifier='com.tooming.garagediag',
         info_plist={
             'NSHighResolutionCapable': True,
             'LSMinimumSystemVersion': '10.13',
@@ -116,7 +116,7 @@ else:
     # Windows/Linux: single-file executable, easiest to hand over
     exe = EXE(
         pyz, a.scripts, a.binaries, a.datas, [],
-        name='OpenDiag', debug=False, bootloader_ignore_signals=False,
+        name='GarageDiag', debug=False, bootloader_ignore_signals=False,
         strip=False, upx=False, runtime_tmpdir=None,
         console=False, disable_windowed_traceback=False,
         icon='app.ico',

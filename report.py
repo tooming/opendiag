@@ -172,7 +172,7 @@ def _fmt_range(r, unit=""):
 
 
 def to_markdown(report):
-    lines = ["# OpenDiag Diagnostic Report", ""]
+    lines = ["# GarageDiag Diagnostic Report", ""]
     lines.append(f"Generated {report['generated_at']} "
                  f"(app `{report['app_version']}`)")
     lines.append("")

@@ -1805,7 +1805,7 @@ def _current_operator():
     """Signed-in cloud identity's email, to stamp onto locally created
     events as producer.operator (see ovpf_producer._stamp_operator and
     OVPF.md's spec field) -- distinct from producer.name/type, which
-    describe the tool/mechanism (opendiag, a Diagnostic read), not who was
+    describe the tool/mechanism (garagediag, a Diagnostic read), not who was
     actually at the keyboard. ovpf_producer.py can't check this itself
     (ovpf_cloud imports ovpf_producer, not the other way around). None if
     nobody's signed in -- the common, fully-anonymous case, and events
@@ -2241,6 +2241,22 @@ def detect_pull(values):
 
     Returns: ("start", pull_number) | ("end", pull_number) | None
     """
+    if ADAPTER and ADAPTER.proto == "vag":
+        # Confirmed live (Octavia drive, 2026-07-28) that this heuristic
+        # false-positives constantly on ordinary driving here: engine_load
+        # stayed only 40-78% during every one of ~10 false "pulls" logged
+        # in a single drive (vs a real 98% max elsewhere in that same
+        # session), even though throttle (PID 0x11) hit 79-88%. This
+        # turbocharged, drive-by-wire MQB engine opens the throttle blade
+        # wide for routine assertive acceleration (merging, passing) since
+        # boost -- not blade angle -- supplies extra torque at part
+        # throttle, unlike the cable-throttle BMWs this was tuned against
+        # (see the comments below). No confirmed real WOT run on this car
+        # exists to calibrate a load-based threshold instead of guessing
+        # one, so this dyno/tuning-culture feature (built and validated
+        # only for e39/e87) is simply off here rather than risk another
+        # unverified heuristic.
+        return None
     # Extract values, handling different param IDs across profiles (E39 DS2
     # MS41 profiles use P8/P13; the E87 KWP2000 channels use the plain
     # names -- same fallback pattern already used elsewhere in this file,
@@ -2509,7 +2525,7 @@ def snapshot_faults(addr, faults):
 # not on the value being hidden. It does nothing to stop a local process
 # that can already run arbitrary code on this machine -- that's a
 # different, larger threat model than "a webpage tricked the browser".
-_CLIENT_HEADER = "X-OpenDiag-Client"
+_CLIENT_HEADER = "X-GarageDiag-Client"
 
 
 class Handler(BaseHTTPRequestHandler):

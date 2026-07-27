@@ -2,14 +2,14 @@
 """Build a native macOS ``.app`` bundle for the desktop dashboard.
 
 This does NOT freeze the code (no py2app). It produces a real, double-
-clickable ``OpenDiag.app`` — icon in Finder/Applications, launches
+clickable ``GarageDiag.app`` — icon in Finder/Applications, launches
 with no Terminal window — whose executable simply runs ``desktop_app.py``
 through the project's ``.venv``. Because the real source files run in
 place, every ``__file__``-relative path (ui.html, the *.json tables) just
 works, and no core module is modified.
 
-    python3 build_app.py            # builds ./OpenDiag.app
-    open "OpenDiag.app"      # or double-click it in Finder
+    python3 build_app.py            # builds ./GarageDiag.app
+    open "GarageDiag.app"      # or double-click it in Finder
     # to put it in the Dock/Launchpad: drag it into /Applications
 
 The project path is baked into the launcher at build time, so the .app
@@ -28,9 +28,9 @@ import sys
 import zlib
 
 PROJECT = os.path.dirname(os.path.abspath(__file__))
-APP_NAME = "OpenDiag"
+APP_NAME = "GarageDiag"
 APP = os.path.join(PROJECT, f"{APP_NAME}.app")
-BUNDLE_ID = "com.tooming.opendiag"
+BUNDLE_ID = "com.tooming.garagediag"
 
 
 # ---------------------------------------------------------------------------
@@ -198,7 +198,7 @@ def build():
         plistlib.dump(info, f)
 
     print(f"\nBuilt: {APP}")
-    print("Launch:  open \"OpenDiag.app\"   (or double-click in Finder)")
+    print("Launch:  open \"GarageDiag.app\"   (or double-click in Finder)")
     print("Install: drag it into /Applications")
 
 

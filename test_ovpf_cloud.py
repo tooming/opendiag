@@ -142,7 +142,7 @@ class CloudTest(unittest.TestCase):
 
     def _append_workshop_event(self, urn, path):
         """A producer.type "Workshop" event with no cloud session behind
-        it -- opendiag itself can no longer create these (the local
+        it -- garagediag itself can no longer create these (the local
         self-asserted Workshop identity was removed as confusing UX), but
         push_passport still has to refuse one if it shows up (a hand-edited
         or pre-removal .ovpf.ndjson file) rather than trust it blindly."""

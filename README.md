@@ -1,4 +1,4 @@
-# OpenDiag
+# GarageDiag
 
 K-line diagnostics for older BMWs (E39 / E87) using a cheap **K+DCAN USB
 cable** — no INPA, no Windows VM, no ELM327. An open, hackable alternative
@@ -241,7 +241,7 @@ Mac app instead of "run a server, open a browser". It uses **pywebview**
 as a child process, so the core stays stdlib-only.
 
 ```sh
-# macOS: just double-click "OpenDiag.command" in Finder
+# macOS: just double-click "GarageDiag.command" in Finder
 #        (first run auto-creates .venv and installs pywebview)
 
 # or from a shell:
@@ -263,8 +263,8 @@ For a real double-clickable app (icon in Finder/Applications, no Terminal
 window):
 
 ```sh
-python3 build_app.py            # builds ./OpenDiag.app
-open "OpenDiag.app"      # or double-click it; drag to /Applications
+python3 build_app.py            # builds ./GarageDiag.app
+open "GarageDiag.app"      # or double-click it; drag to /Applications
 ```
 
 The bundle is a thin launcher — its executable runs `desktop_app.py`
@@ -289,12 +289,12 @@ on every version tag. To build one yourself:
 
 ```sh
 pip install pyinstaller pywebview pyserial segno
-pyinstaller --noconfirm opendiag.spec   # -> dist/OpenDiag.app (mac) or .exe (win)
+pyinstaller --noconfirm garagediag.spec   # -> dist/GarageDiag.app (mac) or .exe (win)
 ```
 
 The frozen app finds its bundled `ui.html`/JSON tables inside the bundle and
-writes logs/backups to a per-user folder (`%APPDATA%\OpenDiag` on Windows,
-`~/Library/Application Support/OpenDiag` on macOS) — see [`paths.py`](paths.py).
+writes logs/backups to a per-user folder (`%APPDATA%\GarageDiag` on Windows,
+`~/Library/Application Support/GarageDiag` on macOS) — see [`paths.py`](paths.py).
 
 > The builds aren't code-signed yet, so the OS shows an "unidentified
 > developer" warning (macOS: right-click → Open; Windows: SmartScreen → Run
@@ -305,9 +305,9 @@ writes logs/backups to a per-user folder (`%APPDATA%\OpenDiag` on Windows,
 - `power_diag.py` — the toolkit (self-contained)
 - `ds2_diag.py` — DS2 protocol tool for pre-2001 BMWs (imports power_diag)
 - `diag_ui.py` + `ui.html` — web dashboard on top of both
-- `desktop_app.py` + `requirements-desktop.txt` + `OpenDiag.command`
+- `desktop_app.py` + `requirements-desktop.txt` + `GarageDiag.command`
   — optional native-window wrapper (pywebview)
-- `build_app.py` — builds the `OpenDiag.app` bundle (launcher + icon)
+- `build_app.py` — builds the `GarageDiag.app` bundle (launcher + icon)
 - `ms41_dtc.json`, `e87_dtc.json`, `e39_body_dtc_en.json` — fault-code text
   tables
 - `ms41_ram_params.json`, `ms43_ram_params.json` — live-data parameter maps

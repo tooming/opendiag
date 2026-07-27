@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>OpenDiag</title>
+<title>GarageDiag</title>
 <style>
   :root {
     --bg: #14171c; --panel: #1d222a; --panel2: #242a34; --fg: #dfe6ee;
@@ -190,7 +190,7 @@
 </head>
 <body>
 <header>
-  <h1>OpenDiag</h1>
+  <h1>GarageDiag</h1>
   <span id="conn" class="badge off">disconnected</span>
   <span id="proto" class="badge"></span>
   <span id="recbadge" class="badge" style="display:none">● REC</span>
@@ -642,7 +642,7 @@ async function api(path, body) {
   // Custom header on every call (see diag_ui.py's _csrf_ok): forces a CORS
   // preflight, which blocks any cross-origin page from reaching the API --
   // no-op for this same-origin page, where CORS never applies.
-  const headers = { "X-OpenDiag-Client": "1" };
+  const headers = { "X-GarageDiag-Client": "1" };
   const opt = body !== undefined
     ? { method: "POST", body: JSON.stringify(body), headers } : { headers };
   const r = await fetch(path, opt);

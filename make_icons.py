@@ -2,7 +2,7 @@
 """Generate app.icns (macOS) and app.ico (Windows) for the frozen build.
 
 Renders the gauge-dial icon (shared with build_app.py) and writes both
-formats. The committed app.icns / app.ico are what opendiag.spec and CI
+formats. The committed app.icns / app.ico are what garagediag.spec and CI
 consume, so the generation-time deps (Pillow, macOS sips/iconutil) are only
 needed HERE, not in CI. Regenerate and commit after changing the icon:
 
