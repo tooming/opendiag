@@ -1542,9 +1542,13 @@ class VagAdapter:
     (confirmed live: 0x7E8 engine, 0x7E9 transmission) -- handled the same
     way Iso9141Adapter already handles its own multi-responder K-line bus:
     scan()/faults() report every responder, live_sample() tracks whichever
-    has the most PID support as self._src. No coding/adaptations (no
-    manufacturer module map here, only the legislated OBD-II layer) --
-    same limitation Obd2Adapter/Iso9141Adapter already have."""
+    has the most PID support as self._src. No coding/adaptations wired up
+    here in the UI (no manufacturer module map here, only the legislated
+    OBD-II layer) -- same limitation Obd2Adapter/Iso9141Adapter already
+    have. Battery-replacement coding (Gateway module 19) exists as a
+    CLI-only, gated flow instead -- see vag_battery.py/VAG_BATTERY.md and
+    `vag_diag.py code-battery`; not surfaced here yet since the DIDs it
+    needs aren't confirmed."""
     name = "VW Group (Octavia Mk3/MQB and similar, CAN)"
     proto = "vag"
     vin = "VAGXXXXXXXXXXXXXXX"

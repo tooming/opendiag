@@ -26,6 +26,14 @@ Modes:
            reliably known without the physical car — this just tells you
            which raw CAN IDs get a reply, the same way power_diag.py's
            K-line `sweep` finds BMW module addresses on an unknown car.
+  battery-status  best-effort read-only look at the Gateway (module 19);
+           needs --req/--resp CAN IDs found via `sweep` first
+  code-battery  code a replacement battery (capacity/technology/manufacturer)
+           into the Gateway after a battery swap. GATED on a real car until
+           the raw UDS data identifiers are confirmed from a trace captured
+           on this car — see vag_battery.py and VAG_BATTERY.md. Use --demo
+           to exercise the read/backup/write/verify pipeline safely without
+           a car connected.
 
 Use --raw to print every line/frame on the wire (format depends on the
 adapter in use); all traffic is also appended to can_raw.log.
@@ -36,11 +44,13 @@ import datetime
 import os
 import sys
 import time
+import types
 
 from can_transport import SlcanPort, SlcanError, find_port as find_slcan_port
 from can_transport_waveshare import (WaveshareCanPort, WaveshareCanError,
                                       find_port as find_waveshare_port)
 import obd2
+import vag_battery
 from isotp import IsoTpError
 from uds import Uds, UdsError, decode_dtc_records, dtc_to_text
 
@@ -186,6 +196,45 @@ def mode_sweep(port, lo=0x700, hi=0x7FF, quiet_no_dtc=False):
     return found
 
 
+def mode_battery_status(port, args):
+    print(vag_battery.describe_manual_procedure())
+    print()
+    u = Uds(port, args.req, args.resp)
+    info = vag_battery.read_gateway_state(u)
+    for k, v in info.items():
+        print(f"  {k}: {v}")
+
+
+def mode_code_battery(port, args):
+    if args.demo:
+        adapter = types.SimpleNamespace(
+            name="DEMO — simulated Octavia Gateway", vin="DEMOVIN", uds=None)
+    else:
+        if args.req is None or args.resp is None:
+            sys.exit("--req/--resp are required for a real car (find them "
+                      "with `sweep` first), or pass --demo to try the "
+                      "pipeline without a car connected")
+        adapter = types.SimpleNamespace(
+            name="Octavia Gateway", vin=obd2.read_vin(port) or "UNKNOWN_VIN",
+            uds=Uds(port, args.req, args.resp))
+
+    result = vag_battery.code_battery(
+        adapter, args.capacity, args.technology,
+        manufacturer=args.manufacturer, serial=args.serial,
+        user_note=args.note)
+
+    if result.get("gated"):
+        print("BLOCKED:", result["error"])
+        print()
+        print(vag_battery.describe_manual_procedure())
+        sys.exit(1)
+
+    print(f"success: {result['success']}  demo: {result['demo']}")
+    print(f"backup: {result['backup_path']}")
+    if not result["success"]:
+        print(f"error: {result['error']}")
+
+
 def mode_monitor(port, args):
     path = os.path.join(
         DATA_DIR, f"vag_log_{datetime.datetime.now():%Y%m%d_%H%M%S}.csv")
@@ -246,11 +295,42 @@ def main():
                        help="EXPERIMENTAL: probe 0x700-0x7FF for UDS modules")
     p.add_argument("--lo", type=lambda s: int(s, 16), default=0x700)
     p.add_argument("--hi", type=lambda s: int(s, 16), default=0x7FF)
+    p = sub.add_parser("battery-status",
+                       help="best-effort read-only look at the Gateway "
+                       "(module 19) for battery-coding sanity checks")
+    p.add_argument("--req", type=lambda s: int(s, 16), required=True,
+                   help="Gateway UDS request CAN ID (hex), found via `sweep`")
+    p.add_argument("--resp", type=lambda s: int(s, 16), required=True,
+                   help="Gateway UDS response CAN ID (hex)")
+    p = sub.add_parser("code-battery",
+                       help="code a replacement battery into the Gateway "
+                       "(GATED on a real car -- see vag_battery.py; "
+                       "--demo simulates the pipeline)")
+    p.add_argument("--req", type=lambda s: int(s, 16), default=None,
+                   help="Gateway UDS request CAN ID (hex), found via `sweep`")
+    p.add_argument("--resp", type=lambda s: int(s, 16), default=None,
+                   help="Gateway UDS response CAN ID (hex)")
+    p.add_argument("--capacity", type=float, required=True,
+                   help="battery capacity in Ah, e.g. 70")
+    p.add_argument("--technology", choices=sorted(vag_battery.BATTERY_TECHNOLOGY),
+                   required=True)
+    p.add_argument("--manufacturer", default=None,
+                   help="e.g. VARTA, BOSCH (informational, see vag_battery.py)")
+    p.add_argument("--serial", default=None)
+    p.add_argument("--note", default="")
+    p.add_argument("--demo", action="store_true",
+                   help="run the pipeline against a simulated Gateway "
+                   "instead of the car")
     p = sub.add_parser("monitor")
     p.add_argument("--interval", type=float, default=0.2)
     p.add_argument("--timeout", type=float, default=0.4)
     p.add_argument("--duration", type=float, default=None)
     args = ap.parse_args()
+
+    if args.mode == "code-battery" and args.demo:
+        # No car needed for the simulated pipeline -- skip opening a port.
+        mode_code_battery(None, args)
+        return
 
     rawlog = os.path.join(DATA_DIR, "can_raw.log")
     try:
@@ -274,6 +354,10 @@ def main():
             mode_clear(port)
         elif args.mode == "sweep":
             mode_sweep(port, args.lo, args.hi)
+        elif args.mode == "battery-status":
+            mode_battery_status(port, args)
+        elif args.mode == "code-battery":
+            mode_code_battery(port, args)
         elif args.mode == "monitor":
             mode_monitor(port, args)
     finally:

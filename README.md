@@ -139,7 +139,29 @@ python3 vag_diag.py scan     # dtc, plus an experimental UDS module sweep
 python3 vag_diag.py clear    # clear DTCs; snapshots fault memory first
 python3 vag_diag.py monitor  # RPM/speed/coolant/voltage -> console + CSV
 python3 vag_diag.py sweep    # probe 0x700-0x7FF for non-emissions modules
+python3 vag_diag.py battery-status --req 0x... --resp 0x...  # read-only Gateway check
+python3 vag_diag.py code-battery --capacity 70 --technology agm --demo  # see below
 ```
+
+### Battery-replacement coding (after fitting an AGM/EFB battery)
+
+`code-battery` codes the new battery's capacity/technology into the
+Gateway (module 19) — needed after any battery swap, and especially after
+switching technology (e.g. flooded/EFB → AGM), so the BMS applies the
+right charge profile instead of the old battery's. This is a **write**, so
+it goes through the same read → backup → write → verify transaction layer
+as every other write in this project.
+
+It ships **gated**: the raw UDS data identifiers the four adaptation
+channels (capacity, technology, manufacturer, serial) map to aren't public
+— see `VAG_BATTERY.md` for the research and sources. On a real car it
+refuses to write anything until those are confirmed from a trace captured
+on this car. `--demo` runs the full pipeline against a simulated Gateway
+so it's testable today; `code-battery --help` and
+`vag_battery.describe_manual_procedure()` (also printed on a blocked real
+run) walk through doing it manually via VCDS/OBDeleven in the meantime.
+`battery-status` is the read-only half — a sanity check that `--req`/
+`--resp` (found via `sweep`) actually reach the Gateway.
 
 Two layers, deliberately kept separate:
 

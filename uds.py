@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 """UDS (ISO 14229) service layer, built on isotp.IsoTpChannel.
 
-Only the services needed for read-only diagnostics (plus gated clear) are
-implemented — this mirrors power_diag.py's KWP2000 service subset and the
-same caution: read-only services are safe to use freely, clear needs the
-user's go-ahead, nothing here does IO control / routine execution / writes.
+Started as read-only diagnostics (plus gated clear) mirroring power_diag.py's
+KWP2000 service subset. Now also exposes the generic write-capable services
+(SecurityAccess, WriteDataByIdentifier, RoutineControl) needed by callers
+like vag_battery.py — these are protocol *primitives* only, safe to add
+because they don't presume any car-specific data identifier or seed/key
+algorithm. Callers are responsible for their own safety gate before ever
+calling write_data_by_identifier()/routine_control() with a real DID/routine
+on a real car — see vag_battery.py's CHANNEL_SPECS gate for the pattern.
 """
 import time
 
@@ -12,10 +16,18 @@ from isotp import IsoTpChannel, IsoTpError
 
 DIAGNOSTIC_SESSION_CONTROL = 0x10
 TESTER_PRESENT = 0x3E
+SECURITY_ACCESS = 0x27
 READ_DTC_INFORMATION = 0x19
 CLEAR_DIAGNOSTIC_INFORMATION = 0x14
 READ_DATA_BY_IDENTIFIER = 0x22
+WRITE_DATA_BY_IDENTIFIER = 0x2E
+ROUTINE_CONTROL = 0x31
 NEGATIVE_RESPONSE = 0x7F
+
+# routineControl sub-functions
+ROUTINE_START = 0x01
+ROUTINE_STOP = 0x02
+ROUTINE_REQUEST_RESULTS = 0x03
 
 SESSION_DEFAULT = 0x01
 SESSION_EXTENDED = 0x03
@@ -96,6 +108,44 @@ class Uds:
         data = bytes([(group >> 16) & 0xFF, (group >> 8) & 0xFF,
                        group & 0xFF])
         return self.request(CLEAR_DIAGNOSTIC_INFORMATION, data, timeout=3.0)
+
+    def write_data_by_identifier(self, did, data):
+        """WriteDataByIdentifier (0x2E). `data` must already be encoded to
+        the byte layout the target DID expects — this layer knows nothing
+        about what any given DID means. Raises UdsError (e.g.
+        securityAccessDenied/requestOutOfRange) on a negative response."""
+        return self.request(WRITE_DATA_BY_IDENTIFIER,
+                             bytes([did >> 8, did & 0xFF]) + bytes(data),
+                             timeout=2.0)
+
+    def security_access(self, level, key_fn):
+        """SecurityAccess (0x27): request a seed at `level` (odd sub-function,
+        e.g. 0x01/0x03/0x05...), pass it to `key_fn(seed_bytes) -> key_bytes`,
+        and send the key back at `level + 1`. Returns True once the ECU
+        accepts the key. A seed of all-zero bytes means the ECU is already
+        unlocked at this level — key_fn is not called in that case.
+
+        `key_fn` carries the actual manufacturer seed/key algorithm, which
+        this module deliberately does not implement — VAG's algorithms are
+        proprietary and not published anywhere this project can point to
+        (unlike e.g. adaptations.py's sourced RomRaider opcode). Raises
+        UdsError (securityAccessDenied/invalidKey/exceedNumberOfAttempts) on
+        a rejected key — note exceedNumberOfAttempts can impose an ECU-side
+        lockout timer, so callers must not retry blindly."""
+        seed = self.request(SECURITY_ACCESS, bytes([level]))
+        if seed and any(b != 0 for b in seed[1:]):
+            key = key_fn(bytes(seed[1:]))
+            self.request(SECURITY_ACCESS, bytes([level + 1]) + bytes(key))
+        return True
+
+    def routine_control(self, sub_function, routine_id, data=b""):
+        """RoutineControl (0x31): start/stop/requestResults a routine.
+        `sub_function` is one of ROUTINE_START/ROUTINE_STOP/
+        ROUTINE_REQUEST_RESULTS."""
+        return self.request(ROUTINE_CONTROL,
+                             bytes([sub_function, routine_id >> 8,
+                                    routine_id & 0xFF]) + bytes(data),
+                             timeout=2.0)
 
 
 def decode_dtc_records(payload, three_byte=True):
